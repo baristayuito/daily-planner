@@ -210,7 +210,12 @@
   <h3>同期</h3>
   <div class="group"><div class="frow"><label>Macからの最終同期</label><span class="num" id="hSync" style="color:var(--sub)">—</span></div></div>
   <p class="hint" style="color:var(--sub);font-size:13px;line-height:19px;margin:8px 4px">Macの Claude Code で「タスク同期して」と言うと、散らばっているタスクが入ります。</p>
-  <div class="card" id="micNote"></div>
+  <h3>接続</h3>
+  <div class="group">
+    <div class="frow"><label>設定コードをコピー</label><button onclick="copyConf()" style="width:auto;margin:0;padding:9px 14px;font-size:15px">コピー</button></div>
+    <div class="frow"><label>接続先を変える</label><button onclick="showSetup()" style="width:auto;margin:0;padding:9px 14px;font-size:15px">やり直す</button></div>
+  </div>
+  <p class="hint" style="color:var(--sub);font-size:13px;line-height:19px;margin:8px 4px">ホーム画面に追加したアプリは保存場所が別なので、初回だけこの設定コードを貼り付けてください。
   <button class="primary" onclick="saveSettings()">保存して再計算</button>
 </div>
 
@@ -230,7 +235,7 @@
   <div class="qchips" id="dQchips"></div>
   <div class="qa" id="dQa"></div>
   <div class="askrow">
-    <input id="dAsk" placeholder="このタスクについて聞く" enterkeyhint="send">
+    <input id="dAsk" placeholder="聞く／やっておいてと指示する" enterkeyhint="send">
     <button onclick="micAsk()" aria-label="話して聞く"><svg viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3M9 21h6"/></svg></button>
     <button class="primary" onclick="sendAsk()" aria-label="送る"><svg viewBox="0 0 24 24"><path d="M4 12h15M13 6l6 6-6 6"/></svg></button>
   </div>
@@ -258,14 +263,22 @@
 
 <div class="toast" id="toast"></div>
 
-<div id="setup" style="display:none;position:fixed;inset:0;z-index:30;background:var(--bg);padding:calc(28px + env(safe-area-inset-top)) 20px 20px;overflow:auto;align-items:flex-start;flex-direction:column">
+<div id="setup" style="display:none;position:fixed;inset:0;z-index:30;background:var(--bg);padding:calc(28px + env(safe-area-inset-top)) 20px calc(28px + env(safe-area-inset-bottom));overflow:auto">
   <h2 style="font-size:24px;line-height:32px;margin:0 0 6px;font-weight:600">つなぐ</h2>
-  <p style="font-size:15px;line-height:23px;color:var(--sub);margin:0">初回だけ、データの置き場所を教えてください。この端末の中にだけ保存され、外には出ません。</p>
-  <label for="setupUrl">アプリのURL（/exec で終わるもの）</label>
-  <input id="setupUrl" placeholder="https://script.google.com/macros/s/.../exec" inputmode="url" autocapitalize="off" autocorrect="off" spellcheck="false">
-  <label for="setupKey">APIキー</label>
-  <input id="setupKey" placeholder="setup で表示された文字列" autocapitalize="off" autocorrect="off" spellcheck="false">
-  <button class="primary" onclick="saveSetup()">保存してはじめる</button>
+  <p style="font-size:15px;line-height:23px;color:var(--sub);margin:0">ホーム画面のアプリはSafariと保存場所が別なので、この1回だけ入力が必要です。次からは聞かれません。</p>
+  <label for="setupCode">設定コード</label>
+  <input id="setupCode" placeholder="Safariの設定タブでコピーした文字列" autocapitalize="off" autocorrect="off" spellcheck="false">
+  <button onclick="pasteSetup()">貼り付けて接続</button>
+  <button class="primary" onclick="saveSetup()">これで接続する</button>
+  <button onclick="testConn()">つながるか試す</button>
+  <p id="setupMsg" style="font-size:14px;line-height:21px;color:var(--sub);margin:10px 2px 0"></p>
+  <button class="text" onclick="toggleManual()">設定コードがない（URLとキーを直接入れる）</button>
+  <div id="manualBox" style="display:none">
+    <label for="setupUrl">アプリのURL（/exec で終わるもの）</label>
+    <input id="setupUrl" placeholder="https://script.google.com/macros/s/.../exec" inputmode="url" autocapitalize="off" autocorrect="off" spellcheck="false">
+    <label for="setupKey">APIキー</label>
+    <input id="setupKey" placeholder="setup で表示された文字列" autocapitalize="off" autocorrect="off" spellcheck="false">
+  </div>
 </div>
 
 <script src="parser.js"></script>
@@ -278,33 +291,90 @@ function toast(m) { var t = $('toast'); t.textContent = m; t.style.display = 'bl
 var CONF = null;
 function loadConf() { try { CONF = JSON.parse(localStorage.getItem('dp.conf') || 'null'); } catch (e) { CONF = null; } return CONF; }
 function saveConf(url, key) { CONF = { url: url.trim(), key: key.trim() }; localStorage.setItem('dp.conf', JSON.stringify(CONF)); }
-/** GASの /exec へ POST する。text/plain にしてプリフライトを避ける（GASはOPTIONSに応答しないため） */
+/** 設定コード＝URLとキーを1つの文字列にしたもの。ホーム画面のアプリはSafariと保存領域が別なので、
+ *  1回だけ入れ直す必要がある。2つ打つのは面倒なのでコード1つの貼り付けで済むようにしている。 */
+function encodeConf(c) { return btoa(unescape(encodeURIComponent(JSON.stringify({ u: c.url, k: c.key })))).replace(/=+$/, ''); }
+function decodeConf(code) {
+  try {
+    var s = code.trim().replace(/\s/g, ''); while (s.length % 4) s += '=';
+    var o = JSON.parse(decodeURIComponent(escape(atob(s))));
+    if (o && o.u && o.k) return { url: o.u, key: o.k };
+  } catch (e) {}
+  return null;
+}
+/** GASの /exec へ POST する。text/plain にしてプリフライトを避ける（GASはOPTIONSに応答しないため）。
+ *  Safariは 302 のまたぎで fetch が失敗することがあるので、失敗したら XHR でもう一度だけ試す。 */
+function post(url, body) {
+  return fetch(url, { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, redirect: 'follow', body: body })
+    .then(function (r) { return r.text(); })
+    .catch(function (e1) {
+      return new Promise(function (res, rej) {
+        try {
+          var x = new XMLHttpRequest();
+          x.open('POST', url, true);
+          x.setRequestHeader('Content-Type', 'text/plain;charset=utf-8');
+          x.onload = function () { res(x.responseText); };
+          x.onerror = function () { rej(new Error((e1 && e1.message ? e1.message : 'fetch失敗') + ' ／ 再試行も失敗')); };
+          x.ontimeout = function () { rej(new Error('時間切れ')); };
+          x.timeout = 60000;
+          x.send(body);
+        } catch (e2) { rej(e1 || e2); }
+      });
+    });
+}
 function run(fn, args, cb) {
   if (!CONF) return showSetup();
   busy(true);
-  fetch(CONF.url, { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, redirect: 'follow',
-    body: JSON.stringify({ action: 'app', key: CONF.key, op: fn, args: args || [] }) })
-    .then(function (r) { return r.text(); })
+  post(CONF.url, JSON.stringify({ action: 'app', key: CONF.key, op: fn, args: args || [] }))
     .then(function (txt) {
       busy(false);
-      var j; try { j = JSON.parse(txt); } catch (e) { toast('応答が読めません。接続先を確認してください'); return; }
-      if (j.error) { toast('エラー: ' + j.error); if (/unauthorized/.test(j.error)) showSetup(); return; }
+      var j; try { j = JSON.parse(txt); } catch (e) { toast('応答が読めません。URLが正しいか確認してください'); return; }
+      if (j.error) { toast(/unauthorized/.test(j.error) ? 'APIキーが違います' : 'エラー: ' + j.error); if (/unauthorized/.test(j.error)) showSetup(); return; }
       cb && cb(j.result);
     })
-    .catch(function (e) { busy(false); toast('つながりません: ' + (e.message || e)); });
+    .catch(function (e) { busy(false); toast('つながりません（' + (e.name || '') + ' ' + (e.message || e) + '）'); });
 }
-function showSetup() {
-  busy(false);
-  $('setupUrl').value = (CONF && CONF.url) || '';
-  $('setupKey').value = (CONF && CONF.key) || '';
-  $('setup').style.display = 'flex';
+/** 接続テスト：どこで失敗しているかを画面に出す */
+function testConn() {
+  var u = ($('setupCode').value.trim() ? (decodeConf($('setupCode').value) || {}).url : $('setupUrl').value.trim());
+  var k = ($('setupCode').value.trim() ? (decodeConf($('setupCode').value) || {}).key : $('setupKey').value.trim());
+  var out = $('setupMsg');
+  if (!u || !k) { out.textContent = 'URLとキーを入れてから押してください'; return; }
+  out.textContent = '確認しています…';
+  post(u, JSON.stringify({ action: 'app', key: k, op: 'api_getSettings', args: [] }))
+    .then(function (txt) {
+      var j; try { j = JSON.parse(txt); } catch (e) { out.textContent = '通信はできましたが、返ってきた内容が想定と違います。URLの末尾が /exec か確認してください。'; return; }
+      if (j.error) { out.textContent = /unauthorized/.test(j.error) ? 'つながりましたが、APIキーが違います。' : 'サーバーからエラー: ' + j.error; return; }
+      out.textContent = 'つながりました。「これで接続する」を押してください。';
+    })
+    .catch(function (e) { out.textContent = 'つながりません（' + (e.name || '') + ' ' + (e.message || e) + '）。電波と、URLの末尾が /exec かを確認してください。'; });
 }
+function showSetup() { busy(false); $('setupCode').value = ''; $('setupUrl').value = (CONF && CONF.url) || ''; $('setupKey').value = (CONF && CONF.key) || ''; $('setup').style.display = 'block'; }
+function hideSetup() { $('setup').style.display = 'none'; }
+function pasteSetup() {
+  if (!navigator.clipboard || !navigator.clipboard.readText) { $('setupCode').focus(); return toast('入力欄を長押しして「ペースト」を選んでください'); }
+  navigator.clipboard.readText().then(function (t) { $('setupCode').value = t; saveSetup(); })
+    .catch(function () { $('setupCode').focus(); toast('入力欄を長押しして「ペースト」を選んでください'); });
+}
+function toggleManual() { var m = $('manualBox'); m.style.display = m.style.display === 'none' ? 'block' : 'none'; }
 function saveSetup() {
-  var u = $('setupUrl').value.trim(), k = $('setupKey').value.trim();
+  var code = $('setupCode').value.trim(), u, k;
+  if (code) { var c = decodeConf(code); if (!c) return toast('設定コードが読めません。もう一度コピーしてください'); u = c.url; k = c.key; }
+  else { u = $('setupUrl').value.trim(); k = $('setupKey').value.trim(); }
   if (!/^https:\/\/script\.google\.com\/macros\/s\/.+\/exec/.test(u)) return toast('アプリのURL（/exec で終わるもの）を入れてください');
   if (!k) return toast('APIキーを入れてください');
-  saveConf(u, k); $('setup').style.display = 'none'; load();
+  saveConf(u, k); hideSetup(); load();
 }
+/** 設定タブから設定コードをコピーする */
+function copyConf() {
+  if (!CONF) return toast('まだ接続していません');
+  var code = encodeConf(CONF);
+  var done = function () { toast('コピーしました。ホーム画面のアプリで貼り付けてください'); };
+  if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(code).then(done).catch(function () { promptCode(code); });
+  else promptCode(code);
+}
+function promptCode(code) { window.prompt('この文字列をコピーしてください', code); }
+
 function fmtMin(m) { m = Number(m) || 0; var h = Math.floor(m / 60), r = m % 60; if (!m) return '0分'; return (h ? h + '時間' : '') + (r ? r + '分' : ''); }
 function esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); }
 function md(s) { return s ? Number(String(s).slice(5, 7)) + '/' + Number(String(s).slice(8, 10)) : ''; }
@@ -442,12 +512,13 @@ function fillTask() {
     '<div class="kv"><span>入り方</span><span>' + srcName(t) + '</span></div>' +
     (t.sourceUrl ? '<div class="kv"><span>出典</span><span>' + esc(t.sourceUrl) + '</span></div>' : '') +
     (t.memo && t.detail ? '<div class="kv"><span>メモ</span><span>' + esc(t.memo) + '</span></div>' : '');
-  var qs = ['これは何のこと？', 'いつ振られた？', 'なぜ今やるの？', '何から手をつける？', 'やらないとどうなる？'];
+  var qs = ['これは何のこと？', 'いつ振られた？', 'なぜ今やるの？', '何から手をつける？', '終わった', '明日に回して', '30分に変えて'];
   $('dQchips').innerHTML = qs.map(function (q) { return '<div class="qchip" onclick="ask(\'' + q + '\')">' + q + '</div>'; }).join('');
 }
 function renderQa() {
   $('dQa').innerHTML = qaList.map(function (x) {
-    return '<div class="q">' + esc(x.q) + '</div>' + (x.a ? '<div class="a">' + esc(x.a) + '</div>' : '<div class="a wait">Macの Claude に送りました。次に「タスク同期して」と言えば、ここに答えが入ります。</div>');
+    var wait = (x.kind === '依頼') ? 'Macの Claude に依頼しました。作業が終わると、ここに結果が入ります。' : 'Macの Claude に送りました。答えが出るとここに入ります。';
+    return '<div class="q">' + esc(x.q) + '</div>' + (x.a ? '<div class="a">' + esc(x.a) + '</div>' : '<div class="a wait">' + wait + '</div>');
   }).join('');
 }
 /** 手元のデータだけで答えられる質問はその場で答える（通信なし＝速い） */
@@ -475,12 +546,38 @@ function localAnswer(q, t) {
   }
   return null;
 }
+/** 「やっておいて」系の指示のうち、アプリだけで完結できるものはその場で実行する */
+function localCommand(q, t) {
+  var m;
+  if (/(終わった|完了|done|やった|済んだ)/.test(q)) {
+    return { say: '完了にしました。次のタスクに繰り上げます。', act: function () { var id = t.id; closeSheet('shTask'); run('api_completeTask', [id, t.remainingMin], function (d) { cur = null; render(d); toast('完了。次に繰り上げました'); }); } };
+  }
+  if (/(明日|あした|後で|あとで|来週|回して|延ばして|postpone)/.test(q)) {
+    var days = /来週/.test(q) ? 7 : 1;
+    return { say: (days === 7 ? '来週' : '明日') + '以降に回しました。', act: function () { var id = t.id; closeSheet('shTask'); run('api_postponeTask', [id, days], function (d) { cur = null; render(d); toast('後ろに回しました'); }); } };
+  }
+  if ((m = q.match(/(\d+)\s*(分|時間)/)) && /(変え|にして|見積|かかる|くらい|ぐらい)/.test(q)) {
+    var min = Number(m[1]) * (m[2] === '時間' ? 60 : 1);
+    return { say: '見積を ' + min + '分 に変えて組み直しました。', act: function () { var t2 = JSON.parse(JSON.stringify(t)); t2.estMin = min; t2.remainingMin = min; run('api_saveTask', [t2], function (d) { render(d); }); } };
+  }
+  if (/(優先|急ぎ|最優先|上げて)/.test(q) && !/下げ/.test(q)) {
+    return { say: '優先度を「最優先」にしました。', act: function () { var t2 = JSON.parse(JSON.stringify(t)); t2.priority = 1; run('api_saveTask', [t2], function (d) { render(d); }); } };
+  }
+  if (/(下げて|後回し|優先度.*低)/.test(q)) {
+    return { say: '優先度を「いつでも」にしました。', act: function () { var t2 = JSON.parse(JSON.stringify(t)); t2.priority = 3; run('api_saveTask', [t2], function (d) { render(d); }); } };
+  }
+  return null;
+}
 function ask(q) {
   if (!cur || !q) return;
-  var local = localAnswer(q, cur);
-  if (local) { qaList.push({ q: q, a: local }); renderQa(); setTimeout(function () { $('dQa').lastChild.scrollIntoView({ behavior: 'smooth', block: 'nearest' }); }, 60); return; }
-  qaList.push({ q: q, a: '' }); renderQa();
-  run('api_askTask', [cur.id, q], function (list) { qaList = list || qaList; renderQa(); });
+  var t = cur;
+  var cmd = localCommand(q, t);
+  if (cmd) { qaList.push({ q: q, a: cmd.say }); renderQa(); cmd.act(); return; }
+  var local = localAnswer(q, t);
+  if (local) { qaList.push({ q: q, a: local }); renderQa(); setTimeout(function () { var l = $('dQa').lastChild; if (l) l.scrollIntoView({ behavior: 'smooth', block: 'nearest' }); }, 60); return; }
+  var kind = /(して|やって|お願い|頼む|調べて|作って|書いて|直して|送って)/.test(q) ? '依頼' : '質問';
+  qaList.push({ q: q, a: '', kind: kind }); renderQa();
+  run('api_askTask', [t.id, q, kind], function (list) { qaList = list || qaList; renderQa(); });
 }
 function sendAsk() { var v = $('dAsk').value.trim(); if (!v) return; $('dAsk').value = ''; ask(v); }
 $('dAsk').addEventListener('keydown', function (e) { if (e.key === 'Enter') sendAsk(); });
@@ -540,6 +637,21 @@ function saveSettings() { var o = {}; SKEYS.forEach(function (k) { o[k] = $('s_'
 // ---- 追加シートの音声 ----
 function toggleMic() { if (rec) return stopMic(); $('mic').className = 'mic rec'; $('micTx').textContent = 'キーボードの🎤を押して話してください'; focusForDictation($('quick')); }
 function stopMic() { if (rec) { try { rec.stop(); } catch (e) {} rec = null; } var m = $('mic'); if (m) { m.className = 'mic'; $('micTx').textContent = '話して追加（例：LP直し 40分 金曜まで）'; } }
+
+// ---- アプリ内で常に最新にする ----
+var lastLoad = 0;
+var _origRender = render;
+render = function (d) { lastLoad = Date.now(); _origRender(d); };
+function refresh(force) { if (!force && Date.now() - lastLoad < 20000) return; load(); }
+document.addEventListener('visibilitychange', function () { if (!document.hidden) refresh(); });
+window.addEventListener('focus', function () { refresh(); });
+setInterval(function () { if (!document.hidden) refresh(); }, 180000);
+// 上端で下に引っぱると更新
+(function () {
+  var y0 = null;
+  document.addEventListener('touchstart', function (e) { y0 = (window.scrollY <= 0 && !document.body.classList.contains('locked')) ? e.touches[0].clientY : null; }, { passive: true });
+  document.addEventListener('touchmove', function (e) { if (y0 != null && e.touches[0].clientY - y0 > 110) { y0 = null; toast('更新しています'); refresh(true); } }, { passive: true });
+})();
 
 try { history.replaceState({ i: 0 }, ''); } catch (e) {}
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(function () {});

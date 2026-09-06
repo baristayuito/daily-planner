@@ -1,5 +1,5 @@
 /* 画面（HTML/JS/アイコン）だけをキャッシュする。データは毎回GASへ取りに行く。 */
-const CACHE = 'dp-v1';
+const CACHE = 'dp-v2';
 const SHELL = ['./', './index.html', './parser.js', './manifest.webmanifest',
   './icon-180.png', './icon-192.png', './icon-512.png', './icon-512-maskable.png'];
 
