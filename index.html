@@ -581,21 +581,43 @@ function ask(q) {
 }
 function sendAsk() { var v = $('dAsk').value.trim(); if (!v) return; $('dAsk').value = ''; ask(v); }
 $('dAsk').addEventListener('keydown', function (e) { if (e.key === 'Enter') sendAsk(); });
-function micAsk() { focusForDictation($('dAsk')); }
+function micAsk() { startDictation($('dAsk'), { onDone: function () { sendAsk(); } }); }
 
-/** GASのページはGoogleのiframe内で、その許可リストにmicrophoneが無い＝Web Speech APIは使えない。
- *  そこで入力欄にフォーカスしてキーボードの音声入力（マイクキー）を使ってもらう。 */
-function focusForDictation(el) {
+/** マイクを開いて話した内容を el に流し込む。戻り値＝開けたかどうか。
+ *  el.focus() は「開けなかったとき」だけ呼ぶ。先にフォーカスするとiOSでキーボードが出て認識が止まる。 */
+var recReset = null;
+function startDictation(el, opts) {
+  opts = opts || {};
   var SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-  el.focus();
-  if (!SR) { toast('キーボードの🎤を押して話してください'); return; }
-  try {
-    var r = new SR(); r.lang = 'ja-JP'; r.interimResults = true; r.continuous = false;
-    r.onresult = function (e) { var s = ''; for (var i = 0; i < e.results.length; i++) s += e.results[i][0].transcript; el.value = s; if (el.id === 'quick') { el.dataset.voice = '1'; applyParse(); } };
-    r.onerror = function () { toast('キーボードの🎤を押して話してください'); };
-    r.start(); rec = r;
-  } catch (err) { toast('キーボードの🎤を押して話してください'); }
+  if (!SR) { fallbackToKeyboard(el, 'この端末はアプリ内の音声入力に対応していません。キーボードの🎤で話してください'); return false; }
+  stopDictation();
+  var r, spoke = false;
+  try { r = new SR(); } catch (e) { fallbackToKeyboard(el, 'マイクを開けませんでした。キーボードの🎤で話してください'); return false; }
+  r.lang = 'ja-JP'; r.interimResults = true; r.continuous = false; r.maxAlternatives = 1;
+  r.onresult = function (e) {
+    var s = ''; for (var i = 0; i < e.results.length; i++) s += e.results[i][0].transcript;
+    if (s) spoke = true;
+    el.value = s;
+    if (opts.onText) opts.onText(s);
+  };
+  r.onerror = function (e) {
+    var c = e && e.error;
+    rec = null; if (recReset) { recReset(); recReset = null; }
+    if (c === 'not-allowed' || c === 'service-not-allowed') toast('マイクが許可されていません。iPhoneの設定 → プランナー → マイク をオンにしてください');
+    else if (c === 'no-speech') toast('聞き取れませんでした。もう一度押してください');
+    else if (c === 'aborted') return;
+    else fallbackToKeyboard(el, '音声が使えないのでキーボードの🎤で話してください');
+  };
+  r.onend = function () {
+    rec = null; if (recReset) { recReset(); recReset = null; }
+    if (spoke && opts.onDone) opts.onDone(el.value);
+  };
+  try { r.start(); } catch (e) { fallbackToKeyboard(el, 'マイクを開けませんでした。キーボードの🎤で話してください'); return false; }
+  rec = r; recReset = opts.onStop || null;
+  return true;
 }
+function stopDictation() { if (!rec) return; var r = rec; rec = null; try { r.stop(); } catch (e) {} if (recReset) { recReset(); recReset = null; } }
+function fallbackToKeyboard(el, msg) { try { el.focus(); } catch (e) {} toast(msg); }
 
 // ---- 追加/編集 ----
 function openAdd() { editId = null; $('addTitle').textContent = '新しいタスク'; $('btnDel').style.display = 'none'; ['quick', 'f_title', 'f_detail', 'f_estMin', 'f_deadline', 'f_remainingMin'].forEach(function (i) { $(i).value = ''; }); $('quick').dataset.voice = ''; setSeg('f_priority', 2); setSeg('f_cat', 'コーヒー事業'); $('micTx').textContent = '話して追加（例：LP直し 40分 金曜まで）'; showSheet('shAdd'); pushState({ p: curState().p, f: filter, s: 'shAdd', t: null }); }
@@ -630,13 +652,27 @@ function fillSettings() {
   SKEYS.forEach(function (k) { $('s_' + k).value = D.settings[k]; });
   SBOOL.forEach(function (k) { $('s_' + k).checked = String(D.settings[k]) === 'true'; });
   var SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-  $('micNote').innerHTML = '<h4>音声について</h4><p style="font-size:15px;line-height:23px">この画面はGoogleの枠の中で動いていて、その枠がマイクを許可していないため、アプリ内の録音は使えません。マイクのボタンを押すと入力欄が開くので、<b>キーボードの🎤</b>で話してください。' + (SR ? '' : '（この端末はブラウザの音声認識にも非対応です）') + '</p>';
+  var mn = $('micNote');
+  if (mn) mn.innerHTML = '<h4>音声について</h4><p style="font-size:15px;line-height:23px">マイクのボタンを押すとその場で音声入力が始まります。' + (SR ? '' : '（この端末はブラウザの音声認識に非対応なので、キーボードの🎤を使ってください）') + '</p>';
 }
 function saveSettings() { var o = {}; SKEYS.forEach(function (k) { o[k] = $('s_' + k).value; }); SBOOL.forEach(function (k) { o[k] = $('s_' + k).checked ? 'true' : 'false'; }); run('api_saveSettings', [o], function () { toast('保存しました'); load(); }); }
 
 // ---- 追加シートの音声 ----
-function toggleMic() { if (rec) return stopMic(); $('mic').className = 'mic rec'; $('micTx').textContent = 'キーボードの🎤を押して話してください'; focusForDictation($('quick')); }
-function stopMic() { if (rec) { try { rec.stop(); } catch (e) {} rec = null; } var m = $('mic'); if (m) { m.className = 'mic'; $('micTx').textContent = '話して追加（例：LP直し 40分 金曜まで）'; } }
+function toggleMic() {
+  if (rec) return stopMic();
+  micUi(true);
+  var ok = startDictation($('quick'), {
+    onText: function () { $('quick').dataset.voice = '1'; applyParse(); },
+    onStop: function () { micUi(false); }
+  });
+  if (!ok) micUi(false);
+}
+function stopMic() { stopDictation(); micUi(false); }
+function micUi(on) {
+  var m = $('mic'); if (!m) return;
+  m.className = on ? 'mic rec' : 'mic';
+  $('micTx').textContent = on ? '聞いています…（もう一度押すと止める）' : '話して追加（例：LP直し 40分 金曜まで）';
+}
 
 // ---- アプリ内で常に最新にする ----
 var lastLoad = 0;
