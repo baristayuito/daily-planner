@@ -85,6 +85,7 @@
   button.del{background:transparent;color:var(--danger);font-weight:400;box-shadow:none}
   /* 分類チップ */
   .chips{display:flex;gap:8px;overflow-x:auto;padding:12px 0 6px;margin:0 -16px;padding-left:16px;padding-right:16px}.chips::-webkit-scrollbar{display:none}
+  .carry{display:inline-block;margin-right:6px;padding:1px 7px;border-radius:4px;background:var(--band);color:var(--danger);font-size:12px;line-height:18px;font-weight:600;vertical-align:1px}
   .chip{flex:none;padding:9px 15px;border-radius:999px;background:var(--paper);color:var(--fg);font-size:15px;line-height:22px;position:relative;box-shadow:var(--e1),var(--lift)}
   .chip:before{content:"";position:absolute;inset:-4px 0}
   .chip.on{background:linear-gradient(180deg,#2E2E31,#1C1C1E);color:#F4F1EC;box-shadow:var(--e2)}
@@ -380,6 +381,8 @@ function esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, function 
 function md(s) { return s ? Number(String(s).slice(5, 7)) + '/' + Number(String(s).slice(8, 10)) : ''; }
 function wd(s) { return '日月火水木金土'.charAt(new Date(String(s).slice(0, 10) + 'T00:00').getDay()); }
 function dl(s) { return s ? md(s) + '（' + wd(s) + '）' : '期限なし'; }
+/** 間に合わなかった日の翌日から数えて何日運んでいるか。別リストに溜めず、その場に出す */
+function carryLab(t) { return Number(t.carried) > 0 ? '<span class="carry">' + t.carried + '日繰り越し</span>' : ''; }
 function catIdx(t) { var i = CATS.indexOf(t.tag || ''); return i < 0 ? 0 : i; }
 function catTag(t) { return t.tag ? '<span class="cat c' + (catIdx(t) + 1) + '">' + esc(t.tag.replace('事業', '')) + '</span>' : ''; }
 function daysAgo(s) { if (!s) return ''; var d = new Date(String(s).slice(0, 10) + 'T00:00'); var n = Math.round((new Date(D.date + 'T00:00') - d) / 86400000); return n <= 0 ? '今日' : n === 1 ? '昨日' : n + '日前'; }
@@ -443,7 +446,7 @@ function renderTasks() {
   $('taskList').innerHTML = list.map(function (t) {
     var s = D.taskStatus[t.id] || {}, st = s.status || '';
     var lab = st === 'late' ? '間に合わない' : st === 'danger' ? '今すぐ' : st === 'unplaced' ? '空きなし' : (s.finishAt ? md(s.finishAt) + '完了予定' : '');
-    return '<div class="task" onclick="openTask(\'' + t.id + '\')"><div class="dot p' + t.priority + '"></div><div class="m"><div class="tt">' + catTag(t) + esc(t.title) + '</div><div class="ss num">' + dl(t.deadline) + ' · ' + fmtMin(t.remainingMin) + (s.latestStart ? ' · 着手期限 ' + md(s.latestStart) : '') + '</div></div>' + (lab ? '<div class="st ' + st + '">' + lab + '</div>' : '') + '</div>';
+    return '<div class="task" onclick="openTask(\'' + t.id + '\')"><div class="dot p' + t.priority + '"></div><div class="m"><div class="tt">' + catTag(t) + carryLab(t) + esc(t.title) + '</div><div class="ss num">' + dl(t.deadline) + ' · ' + fmtMin(t.remainingMin) + (s.latestStart ? ' · 着手期限 ' + md(s.latestStart) : '') + '</div></div>' + (lab ? '<div class="st ' + st + '">' + lab + '</div>' : '') + '</div>';
   }).join('') || '<div class="empty">このカテゴリのタスクはありません</div>';
 }
 
@@ -505,7 +508,7 @@ function fillTask() {
   var t = cur, s = D.taskStatus[t.id] || {};
   $('dTitle').textContent = t.title;
   var stLab = s.status === 'late' ? '間に合わない' : s.status === 'danger' ? '今すぐ着手' : s.status === 'unplaced' ? '空きなし' : (s.finishAt ? md(s.finishAt) + ' 完了予定' : '');
-  $('dBadges').innerHTML = catTag(t) + '<span class="num">' + dl(t.deadline) + ' · 残り' + fmtMin(t.remainingMin) + ' · ' + ['最優先', '通常', 'いつでも'][t.priority - 1] + (stLab ? ' · ' + stLab : '') + '</span>';
+  $('dBadges').innerHTML = catTag(t) + carryLab(t) + '<span class="num">' + dl(t.deadline) + ' · 残り' + fmtMin(t.remainingMin) + ' · ' + ['最優先', '通常', 'いつでも'][t.priority - 1] + (stLab ? ' · ' + stLab : '') + '</span>';
   $('dWhat').innerHTML = '<h4>何をするか</h4><p>' + esc(t.detail || t.memo || t.title) + '</p>';
   $('dFrom').innerHTML = '<h4>どこから来たか</h4>' +
     '<div class="kv"><span>受け取った日</span><span class="num">' + esc(String(t.receivedAt || t.createdAt || '').slice(0, 16).replace('-', '/').replace('-', '/')) + '（' + daysAgo(t.receivedAt || t.createdAt) + '）</span></div>' +
@@ -531,6 +534,7 @@ function localAnswer(q, t) {
     return String(t.receivedAt || t.createdAt || '').slice(0, 16).replace(/-/g, '/') + '（' + daysAgo(t.receivedAt || t.createdAt) + '）に、' + srcName(t) + 'ました。';
   }
   if (/なぜ|どうして|理由/.test(q)) {
+    if (Number(t.carried) > 0) return '最初の期限は ' + dl(t.firstDeadline) + ' で、間に合わないまま ' + t.carried + '回 今日へ運んでいます。見積を下げるか、思い切って消すかを決めたほうがいいかもしれません。';
     if (s.status === 'late') return '期限 ' + dl(t.deadline) + ' に対して空き時間が足りません。見積を下げるか、他を後ろに回す必要があります。';
     if (s.status === 'danger') return '着手期限を過ぎています。今日中に始めないと期限 ' + dl(t.deadline) + ' に間に合いません。';
     if (t.priority === 1) return '最優先だからです。' + (t.deadline ? '期限は ' + dl(t.deadline) + '。' : '') + (t.memo || '');
