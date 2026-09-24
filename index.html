@@ -769,8 +769,9 @@ render = function (d) {
 })();
 
 try { history.replaceState({ i: 0 }, ''); } catch (e) {}
-drawLast();   // 前回の内容を先に出す。通信を待って空の画面を見せない
-load();
+if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(function () {});
+// 接続情報を読んでから、前回の内容を描いて、取りに行く
+if (loadConf()) { drawLast(); load(); } else showSetup();
 </script>
 </body>
 </html>
