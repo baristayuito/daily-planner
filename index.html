@@ -334,14 +334,14 @@ function post(url, body) {
       });
     });
 }
-function run(fn, args, cb) {
+function run(fn, args, cb, onErr) {
   if (!CONF) return showSetup();
   busy(true);
   post(CONF.url, JSON.stringify({ action: 'app', key: CONF.key, op: fn, args: args || [] }))
     .then(function (txt) {
       busy(false);
       var j; try { j = JSON.parse(txt); } catch (e) { toast('応答が読めません。URLが正しいか確認してください'); return; }
-      if (j.error) { toast(/unauthorized/.test(j.error) ? 'APIキーが違います' : 'エラー: ' + j.error); if (/unauthorized/.test(j.error)) showSetup(); return; }
+      if (j.error) { if (onErr && onErr(j.error)) return; toast(/unauthorized/.test(j.error) ? 'APIキーが違います' : 'エラー: ' + j.error); if (/unauthorized/.test(j.error)) showSetup(); return; }
       cb && cb(j.result);
     })
     .catch(function (e) { busy(false); toast('つながりません（' + (e.name || '') + ' ' + (e.message || e) + '）'); });
@@ -426,11 +426,38 @@ function catTag(t) { return t.tag ? '<span class="cat c' + (catIdx(t) + 1) + '">
 function daysAgo(s) { if (!s) return ''; var d = new Date(String(s).slice(0, 10) + 'T00:00'); var n = Math.round((new Date(D.date + 'T00:00') - d) / 86400000); return n <= 0 ? '今日' : n === 1 ? '昨日' : n + '日前'; }
 function srcName(t) { return t.source === 'claude' ? 'Claudeが判定して登録' : t.source === 'obsidian' ? 'Obsidianのメモから' : t.source === 'voice' ? '自分が話して登録' : '自分が入力'; }
 
-function load() { run('api_getToday', [], render); }
+/** 起動と画面復帰は「読むだけ」。サーバは再計算せずキャッシュを返すので1〜2秒で戻る。
+ *  さらに前回の内容を端末に残してあるので、通信を待たずに先に描く（空の画面を見せない）。 */
+var VIEW_OK = true;                       // サーバが api_getView を持っているか（古いデプロイでも動くように）
+function load(full) {
+  if (full || !VIEW_OK) return run('api_getToday', [], render);
+  run('api_getView', [], render, function (err) {
+    if (/unknown op/.test(String(err))) { VIEW_OK = false; run('api_getToday', [], render); return true; }
+  });
+}
+
+var LAST_KEY = 'dp.lastView';
+function saveLast(d) { try { localStorage.setItem(LAST_KEY, JSON.stringify(d)); } catch (e) {} }
+function drawLast() {
+  try {
+    var raw = localStorage.getItem(LAST_KEY); if (!raw) return false;
+    var d = JSON.parse(raw);
+    if (!d || !d.date) return false;
+    d.stale = true;
+    render(d);
+    return true;
+  } catch (e) { return false; }
+}
+/** 計算し直してから描く。編集したあとや、内容が古くなったときだけ使う */
+function recompute(quiet) { if (!quiet) toast('組み直しています'); run('api_getToday', [], render); }
 function render(d) {
   D = d;
+  if (!d.stale) saveLast(d);
   $('hDate').innerHTML = md(d.date) + '<span>' + d.weekday + '曜日</span>';
-  $('hSync').textContent = d.lastSync ? String(d.lastSync).slice(5, 16).replace('-', '/') : '—';
+  $('hSync').textContent = d.stale ? '前回の内容' :
+    (Number(d.staleMin) >= 60 ? Math.floor(d.staleMin / 60) + '時間前の組み立て' :
+     Number(d.staleMin) >= 1 ? d.staleMin + '分前の組み立て' :
+     (d.lastSync ? String(d.lastSync).slice(5, 16).replace('-', '/') : '—'));
   var late = d.warnings.filter(function (w) { return w.type === 'late' || w.type === 'unplaced'; }).length;
   var dng = d.warnings.filter(function (w) { return w.type === 'danger'; }).length;
   $('alerts').innerHTML = (late || dng) ? '<div class="warn" onclick="goTab(\'pTasks\',\'risk\')"><span>' + (late ? '<b>間に合わない ' + late + '件</b>' : '') + (late && dng ? '　' : '') + (dng ? '今すぐ着手 ' + dng + '件' : '') + '</span><span>›</span></div>' : '';
@@ -721,20 +748,29 @@ function micUi(on) {
 var lastLoad = 0;
 var _origRender = render;
 render = function (d) { lastLoad = Date.now(); _origRender(d); };
-function refresh(force) { if (!force && Date.now() - lastLoad < 20000) return; load(); }
+function refresh(force) { if (!force && Date.now() - lastLoad < 20000) return; load(false); }
 document.addEventListener('visibilitychange', function () { if (!document.hidden) refresh(); });
 window.addEventListener('focus', function () { refresh(); });
 setInterval(function () { if (!document.hidden) refresh(); }, 180000);
+// 組み立てが1時間以上前なら、表示はそのままに裏で組み直す（待たせない）
+var _rendered = render;
+render = function (d) {
+  _rendered(d);
+  if (!d.stale && Number(d.staleMin) >= 60 && !render._busy) {
+    render._busy = true;
+    run('api_getToday', [], function (x) { render._busy = false; render(x); });
+  }
+};
 // 上端で下に引っぱると更新
 (function () {
   var y0 = null;
   document.addEventListener('touchstart', function (e) { y0 = (window.scrollY <= 0 && !document.body.classList.contains('locked')) ? e.touches[0].clientY : null; }, { passive: true });
-  document.addEventListener('touchmove', function (e) { if (y0 != null && e.touches[0].clientY - y0 > 110) { y0 = null; toast('更新しています'); refresh(true); } }, { passive: true });
+  document.addEventListener('touchmove', function (e) { if (y0 != null && e.touches[0].clientY - y0 > 110) { y0 = null; recompute(); } }, { passive: true });
 })();
 
 try { history.replaceState({ i: 0 }, ''); } catch (e) {}
-if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(function () {});
-if (loadConf()) load(); else showSetup();
+drawLast();   // 前回の内容を先に出す。通信を待って空の画面を見せない
+load();
 </script>
 </body>
 </html>
