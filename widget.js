@@ -1,0 +1,221 @@
+// 逆算デイリープランナー ── iPhoneホーム画面ウィジェット（Scriptable用）
+//
+// 置き方（1回だけ）
+//   1. App Storeで「Scriptable」を入れる（無料）
+//   2. https://baristayuito.github.io/daily-planner/widget.html を開いて「コードをコピー」
+//   3. Scriptableを開く → 右上の＋ → 貼り付け → 名前を「デイリープランナー」にする
+//   4. 下の▶を1回押す。設定コードを聞かれるので、アプリの設定タブでコピーした文字列を貼る
+//   5. ホーム画面を長押し → ＋ → Scriptable → 大 を置く
+//      → 置いたウィジェットを長押し →「ウィジェットを編集」→ Script に「デイリープランナー」
+//
+// 2回目以降の更新は要らない。動くたびに公開版を見に行って、新しければ自分を書き換える。
+// 書き換えに失敗しても、貼ったままの版で動き続ける（壊れる方向には倒れない）。
+
+const VERSION = 2;
+const SRC = 'https://baristayuito.github.io/daily-planner/widget.js';
+const KEY = 'dailyPlannerConf';
+const APP_URL = 'https://baristayuito.github.io/daily-planner/';
+const REFRESH_MIN = 15;
+
+// ---- 見た目（アプリと同じ色） ----
+const C = {
+  bg:     Color.dynamic(new Color('#FFFFFF'), new Color('#1C1C1E')),
+  ink:    Color.dynamic(new Color('#1E1E1F'), new Color('#F4F1EC')),
+  sub:    Color.dynamic(new Color('#6B645C'), new Color('#A49D94')),
+  sub2:   Color.dynamic(new Color('#9C958B'), new Color('#6F6961')),
+  line:   Color.dynamic(new Color('#1E1E1F', 0.10), new Color('#F4F1EC', 0.14)),
+  danger: Color.dynamic(new Color('#C2452D'), new Color('#FF6B52')),
+};
+
+// ---- 接続情報（アプリの「設定コード」を使い回す） ----
+function loadConf() {
+  if (!Keychain.contains(KEY)) return null;
+  try { return JSON.parse(Keychain.get(KEY)); } catch (e) { return null; }
+}
+function decodeConf(code) {
+  let s = String(code || '').trim().replace(/\s/g, '');
+  while (s.length % 4) s += '=';
+  try {
+    const o = JSON.parse(Data.fromBase64String(s).toRawString());
+    if (o && o.u && o.k) return { url: o.u, key: o.k };
+  } catch (e) {}
+  return null;
+}
+async function askConf() {
+  const a = new Alert();
+  a.title = '設定コードを貼る';
+  a.message = 'アプリの設定タブの「設定コードをコピー」で取れる文字列を貼ってください。1回だけです。';
+  a.addTextField('設定コード', '');
+  a.addAction('保存'); a.addCancelAction('やめる');
+  if (await a.presentAlert() !== 0) return null;
+  const c = decodeConf(a.textFieldValue(0));
+  if (!c) { const e = new Alert(); e.title = '読めませんでした'; e.message = 'もう一度コピーし直してください。'; e.addAction('OK'); await e.presentAlert(); return null; }
+  Keychain.set(KEY, JSON.stringify(c));
+  return c;
+}
+
+// ---- データ ----
+// 読むだけの口（view）を叩く。サーバはしまってある時間割を返すだけなので2秒かからない。
+// 組み直しはサーバが1時間ごとにやっている。
+async function fetchView(conf) {
+  const url = conf.url + (conf.url.indexOf('?') >= 0 ? '&' : '?') + 'action=view&key=' + encodeURIComponent(conf.key);
+  const r = new Request(url);
+  r.timeoutInterval = 20;
+  const d = await r.loadJSON();
+  if (d && d.error) throw new Error(d.error);
+  return d;
+}
+function cachePath() { const fm = FileManager.local(); return fm.joinPath(fm.cacheDirectory(), 'daily-planner-view.json'); }
+function saveCache(d) { try { FileManager.local().writeString(cachePath(), JSON.stringify(d)); } catch (e) {} }
+function readCache() {
+  try {
+    const fm = FileManager.local(), p = cachePath();
+    if (!fm.fileExists(p)) return null;
+    return { data: JSON.parse(fm.readString(p)), at: fm.modificationDate(p) };
+  } catch (e) { return null; }
+}
+
+// ---- 時刻 ----
+function toMin(hm) { const p = String(hm || '0:0').split(':'); return Number(p[0]) * 60 + Number(p[1] || 0); }
+function nowMin() { const d = new Date(); return d.getHours() * 60 + d.getMinutes(); }
+/** 終わった枠を落とす。サーバの時間割が少し古くても、端末の時計で「いま以降」だけにする */
+function upcoming(rows) {
+  const n = nowMin();
+  return rows.filter(x => {
+    const s = toMin(x.start); let e = toMin(x.end);
+    if (e <= s) e += 24 * 60;          // 23:45–01:30 のように日をまたぐもの
+    return e > n;
+  });
+}
+function isNow(x) { const n = nowMin(), s = toMin(x.start); let e = toMin(x.end); if (e <= s) e += 1440; return s <= n && n < e; }
+
+// ---- 部品 ----
+function text(st, str, size, color, bold) {
+  const t = st.addText(str);
+  t.font = bold ? Font.semiboldSystemFont(size) : Font.systemFont(size);
+  t.textColor = color;
+  return t;
+}
+function rule(w) { const s = w.addStack(); s.size = new Size(0, 1); s.backgroundColor = C.line; s.addSpacer(); }
+function carried(d) { return (d.tasks || []).filter(t => Number(t.carried) > 0).length; }
+
+function header(w, d, stale) {
+  const h = w.addStack(); h.centerAlignContent();
+  text(h, d.date.slice(5).replace('-', '/').replace(/^0/, '') + '（' + d.weekday + '）', 15, C.ink, true);
+  h.addSpacer();
+  if (stale) { text(h, stale, 11, C.sub2); h.addSpacer(8); }
+  const c = carried(d);
+  if (c) text(h, '繰り越し ' + c + '件', 12, C.danger, true);
+}
+
+/** いまやる1件を大きく。枠の外（空き時間）なら「つぎ」として次の1件を出す */
+function focus(w, x, size, lines) {
+  const on = isNow(x);
+  text(w, (on ? 'いま ' : 'つぎ ') + x.start + '–' + x.end + (x.type === 'event' ? '　予定' : '　' + x.minutes + '分'), 12, on ? C.ink : C.sub, true);
+  w.addSpacer(3);
+  const t = text(w, x.title, size, x.type === 'event' ? C.sub : C.ink, true);
+  t.lineLimit = lines;
+  t.minimumScaleFactor = 0.8;
+}
+
+function row(w, x, size) {
+  const s = w.addStack(); s.centerAlignContent();
+  const tm = text(s, x.start, size - 1, C.sub, true); tm.lineLimit = 1;
+  s.addSpacer(10);
+  const t = text(s, (x.type === 'event' ? '［予定］' : '') + x.title, size, x.type === 'event' ? C.sub : C.ink);
+  t.lineLimit = 1;
+  s.addSpacer(6);
+  if (x.type !== 'event') text(s, x.minutes + '分', size - 3, x.status === 'late' ? C.danger : C.sub2);
+}
+
+function build(d, family, stale) {
+  const w = new ListWidget();
+  w.backgroundColor = C.bg;
+  w.url = APP_URL;
+  w.refreshAfterDate = new Date(Date.now() + REFRESH_MIN * 60 * 1000);
+
+  const rows = upcoming(d.today || []);
+
+  if (family === 'small') {
+    w.setPadding(14, 14, 12, 14);
+    if (!rows.length) { text(w, '今日はもう何もありません', 14, C.sub, true); return w; }
+    focus(w, rows[0], 17, 4);
+    w.addSpacer();
+    const c = carried(d);
+    if (c) text(w, '繰り越し ' + c + '件', 11, C.danger, true);
+    return w;
+  }
+
+  w.setPadding(16, 16, 14, 16);
+  header(w, d, stale);
+  w.addSpacer(8); rule(w); w.addSpacer(10);
+
+  if (!rows.length) { text(w, '今日はもう何もありません', 15, C.sub, true); w.addSpacer(); return w; }
+
+  const big = family === 'large';
+  focus(w, rows[0], big ? 20 : 16, big ? 3 : 2);
+
+  // 同じタスクが2枠に分かれていても一覧には1回だけ出す（場所がもったいない）
+  const seen = new Set([rows[0].taskId || rows[0].title]);
+  const uniq = rows.slice(1).filter(x => { const k = x.taskId || x.title; if (seen.has(k)) return false; seen.add(k); return true; });
+  const rest = uniq.slice(0, big ? 5 : 2);
+  if (rest.length) {
+    w.addSpacer(big ? 12 : 8); rule(w); w.addSpacer(big ? 8 : 6);
+    rest.forEach((x, i) => { row(w, x, big ? 15 : 13); if (i < rest.length - 1) w.addSpacer(big ? 7 : 4); });
+  }
+  const more = uniq.length - rest.length;
+  w.addSpacer();
+  if (more > 0) text(w, 'ほか ' + more + '件', 11, C.sub2);
+  return w;
+}
+
+function message(title, body) {
+  const w = new ListWidget();
+  w.backgroundColor = C.bg; w.setPadding(16, 16, 16, 16); w.url = APP_URL;
+  text(w, title, 15, C.ink, true); w.addSpacer(6); text(w, body, 12, C.sub);
+  return w;
+}
+
+// ---- 自分を最新版に差し替える ----
+// 公開版の VERSION が大きければ、このスクリプトのファイルを丸ごと書き換える。次に動いたときから新しい版になる。
+async function selfUpdate() {
+  try {
+    const r = new Request(SRC + '?t=' + Date.now());
+    r.timeoutInterval = 8;
+    const code = await r.loadString();
+    const m = code.match(/const VERSION = (\d+);/);
+    if (!m || Number(m[1]) <= VERSION || code.indexOf('逆算デイリープランナー') < 0) return;
+    let fm;
+    try { fm = FileManager.iCloud(); if (!fm.fileExists(module.filename)) fm = FileManager.local(); } catch (e) { fm = FileManager.local(); }
+    fm.writeString(module.filename, code);
+  } catch (e) {}
+}
+
+// ---- 本体 ----
+let conf = loadConf();
+if (!conf && !config.runsInWidget) conf = await askConf();
+
+let widget;
+const family = config.widgetFamily || 'large';
+if (!conf) {
+  widget = message('設定コードが要ります', 'Scriptableでこのスクリプトを1回実行して、アプリの設定コードを貼ってください。');
+} else {
+  try {
+    const d = await fetchView(conf);
+    saveCache(d);
+    widget = build(d, family, null);
+  } catch (e) {
+    const c = readCache();
+    if (c) {
+      const mins = Math.round((Date.now() - c.at.getTime()) / 60000);
+      widget = build(c.data, family, mins < 60 ? mins + '分前' : Math.round(mins / 60) + '時間前');
+    } else {
+      widget = message('つながりませんでした', String(e).slice(0, 120));
+    }
+  }
+}
+
+await selfUpdate();
+if (config.runsInWidget) Script.setWidget(widget);
+else await widget.presentLarge();
+Script.complete();
